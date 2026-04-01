@@ -290,7 +290,7 @@ async def recibir_mensaje(request: Request):
     try:
         mensaje_obj    = data['entry'][0]['changes'][0]['value']['messages'][0]
         numero_cliente = mensaje_obj['from']
-        texto_usuario  = mensaje_obj['text']['body']
+        tipo_mensaje   = mensaje_obj.get('type')
 
         # Normalizar prefijos Venezuela/México/Argentina
         if numero_cliente.startswith("521"):
@@ -298,6 +298,19 @@ async def recibir_mensaje(request: Request):
         elif numero_cliente.startswith("549"):
             numero_cliente = "54" + numero_cliente[3:]
 
+        # Manejar imágenes (comprobantes de pago)
+        if tipo_mensaje == 'image':
+            print(f"\n📸 [{numero_cliente}] envió una imagen (posible comprobante).")
+            enviar_whatsapp(numero_cliente, "¡He recibido tu comprobante de pago! 📸 Ya lo estoy verificando con el restaurante. Tu pedido estará listo pronto. 🛵💨")
+            return {"status": "ok"}
+        
+        # Ignorar formatos no soportados por Chefy
+        if tipo_mensaje != 'text':
+            enviar_whatsapp(numero_cliente, "Por ahora solo puedo leer mensajes de texto y ver imágenes de pagos. 😅 ¡Dime en texto en qué te ayudo!")
+            return {"status": "ok"}
+
+        # Si es texto normal, extraerlo
+        texto_usuario = mensaje_obj['text']['body']
         print(f"\n📩 [{numero_cliente}]: {texto_usuario}")
 
         # ⏰ Verificar horario antes de responder con IA
