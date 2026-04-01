@@ -166,6 +166,9 @@ REGLAS IMPORTANTES:
 - Si el cliente quiere pagar, comparte los datos de Pago Móvil y pídele que envíe el comprobante.
 - Si el pedido es de un producto AGOTADO, discúlpate y ofrece dos alternativas.
 - No inventes platos ni precios. Solo usa los del menú oficial.
+- Si el cliente te avisa que acaba de pasar una imagen de pago (o si el sistema dice [IMAGEN RECIBIDA: Comprobante de pago]), confírmale de forma ultra amable y pídele el Nro de Referencia y el Monto exacto.
+- CUANDO el cliente te responda con la Referencia y el Monto del pago, agradécele confirmando que el pedido va a cocina y OBLIGATORIAMENTE añade al final de tu mensaje este código exacto: [GUARDAR_PAGO|referencia|monto|resumen_del_pedido]
+Ejemplo: "¡Pago validado! Preparando tu comida. [GUARDAR_PAGO|12345678|15|2 Pizzas]"
 - Si el cliente dice "hola", "buenas", etc., salúdalo y pregúntale en qué puedes ayudarlo.
 - No respondas preguntas ajenas al restaurante.
 
@@ -215,6 +218,17 @@ def obtener_respuesta_ia(numero_cliente: str, mensaje_usuario: str) -> str:
 
         texto_respuesta = completion.choices[0].message.content.strip()
 
+        # Extraer posible comando de guardado de pago generado por la IA
+        import re
+        match = re.search(r'\[GUARDAR_PAGO\|(.*?)\|(.*?)\|(.*?)\]', texto_respuesta)
+        if match:
+            ref = match.group(1).strip()
+            monto = match.group(2).strip()
+            detalle = match.group(3).strip()
+            registrar_pago_google_form(numero_cliente, monto, ref, detalle)
+            # Limpiar el comando para no mostrárselo al cliente en WhatsApp
+            texto_respuesta = re.sub(r'\[GUARDAR_PAGO.*?\]', '', texto_respuesta).strip()
+
         historial_usuarios[numero_cliente].append({
             "role": "assistant",
             "content": texto_respuesta
@@ -247,6 +261,23 @@ def procesar_pedido_db(nombre_plato: str) -> str | None:
 
     session.close()
     return None
+
+# ============================================================
+# REGISTRAR PAGO EN GOOGLE FORMS (EXCEL EN LA NUBE)
+# ============================================================
+def registrar_pago_google_form(telefono: str, monto: str, referencia: str, detalle: str):
+    url = "https://docs.google.com/forms/d/e/1FAIpQLSd6elawoPmmMVY3pqfKoZocmUWwz9amq20jq11JKJipfouzFg/formResponse"
+    data = {
+        "entry.779758917": telefono,
+        "entry.501282425": monto,
+        "entry.1715539663": referencia,
+        "entry.1116587434": detalle
+    }
+    try:
+        requests.post(url, data=data, timeout=5)
+        print(f"✅ Pago guardado en Google Sheets: Ref {referencia}")
+    except Exception as e:
+        print(f"❌ Error guardando pago en Excel: {e}")
 
 # ============================================================
 # ENVIAR MENSAJE POR WHATSAPP
@@ -301,17 +332,17 @@ async def recibir_mensaje(request: Request):
         # Manejar imágenes (comprobantes de pago)
         if tipo_mensaje == 'image':
             print(f"\n📸 [{numero_cliente}] envió una imagen (posible comprobante).")
-            enviar_whatsapp(numero_cliente, "¡He recibido tu comprobante de pago! 📸 Ya lo estoy verificando con el restaurante. Tu pedido estará listo pronto. 🛵💨")
-            return {"status": "ok"}
+            texto_usuario = "[IMAGEN RECIBIDA: Comprobante de pago]"
         
         # Ignorar formatos no soportados por Chefy
-        if tipo_mensaje != 'text':
+        elif tipo_mensaje != 'text':
             enviar_whatsapp(numero_cliente, "Por ahora solo puedo leer mensajes de texto y ver imágenes de pagos. 😅 ¡Dime en texto en qué te ayudo!")
             return {"status": "ok"}
-
-        # Si es texto normal, extraerlo
-        texto_usuario = mensaje_obj['text']['body']
-        print(f"\n📩 [{numero_cliente}]: {texto_usuario}")
+            
+        else:
+            # Si es texto normal, extraerlo
+            texto_usuario = mensaje_obj['text']['body']
+            print(f"\n📩 [{numero_cliente}]: {texto_usuario}")
 
         # ⏰ Verificar horario antes de responder con IA
         if not restaurante_abierto():
