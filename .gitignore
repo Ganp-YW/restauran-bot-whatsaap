@@ -2,3 +2,5 @@ restaurante.db
 __pycache__/
 *.pyc
 .env
+ngrok-v3-stable-windows-amd64/
+ngrok-v3-stable-windows-amd64.zip
