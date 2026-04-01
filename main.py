@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Request, Response, Query
 import requests
 import os
+import time
+import datetime
 from groq import Groq
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean
 from sqlalchemy.orm import declarative_base
@@ -15,11 +17,21 @@ VERIFY_TOKEN   = os.environ.get("VERIFY_TOKEN", "mi_token_secreto_123")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 API_URL        = f"https://graph.facebook.com/v18.0/{ID_TELEFONO}/messages"
 
+# Pago móvil del restaurante
+PAGO_MOVIL = {
+    "telefono": "04243225660",
+    "cedula":   "32468353",
+    "banco":    "Banco de Venezuela (BDV)"
+}
+
+# Horario del restaurante (hora Venezuela UTC-4)
+HORA_APERTURA = 7   # 7:00 AM
+HORA_CIERRE   = 24  # 12:00 AM (medianoche) → se representa como 24
+
 # ============================================================
 # CONFIGURAR GROQ
 # ============================================================
 client_groq = Groq(api_key=GROQ_API_KEY)
-
 
 # ============================================================
 # BASE DE DATOS — SQLAlchemy
@@ -57,7 +69,7 @@ def poblar_db():
             Producto(nombre="Alas de Pollo (6 und)", precio=7.50,  stock=15, descripcion="Alitas marinadas y horneadas. Disponibles en BBQ, buffalo o miel-mostaza."),
             Producto(nombre="Jugo Natural 400ml",     precio=3.00,  stock=25, descripcion="Mango, parchita, guayaba o fresa. Preparado al momento, sin azúcar añadida."),
             Producto(nombre="Refresco",               precio=2.00,  stock=40, descripcion="Coca-Cola, Pepsi, Sprite o Agua mineral."),
-            Producto(nombre="Brownie con Helado",     precio=5.50,  stock=10, disponible=True, descripcion="Brownie de chocolate caliente con 1 bola de helado de vainilla."),
+            Producto(nombre="Brownie con Helado",     precio=5.50,  stock=10, descripcion="Brownie de chocolate caliente con 1 bola de helado de vainilla."),
         ]
         session.add_all(platos)
         session.commit()
@@ -67,36 +79,109 @@ def poblar_db():
 poblar_db()
 
 # ============================================================
+# TASA BCV EN TIEMPO REAL (caché de 1 hora)
+# ============================================================
+_cache_bcv = {"tasa": None, "timestamp": 0}
+
+def obtener_tasa_bcv() -> float | None:
+    """Obtiene la tasa oficial BCV USD→Bs desde la API pública. Se cachea 1 hora."""
+    global _cache_bcv
+    ahora = time.time()
+
+    if _cache_bcv["tasa"] and (ahora - _cache_bcv["timestamp"]) < 3600:
+        return _cache_bcv["tasa"]
+
+    try:
+        resp = requests.get("https://ve.dolarapi.com/v1/dolares/oficial", timeout=5)
+        data = resp.json()
+        tasa = float(data.get("venta") or data.get("promedio") or 0)
+        if tasa > 0:
+            _cache_bcv["tasa"] = tasa
+            _cache_bcv["timestamp"] = ahora
+            print(f"💱 Tasa BCV actualizada: {tasa:.2f} Bs/USD")
+            return tasa
+    except Exception as e:
+        print(f"⚠️ No se pudo obtener tasa BCV: {e}")
+
+    return _cache_bcv["tasa"]  # retorna última tasa cacheada si falla
+
+def precio_en_bs(usd: float) -> str:
+    """Convierte un precio en USD a Bolívares usando la tasa BCV del día."""
+    tasa = obtener_tasa_bcv()
+    if tasa:
+        bs = usd * tasa
+        return f"Bs. {bs:,.2f}"
+    return "N/D"
+
+# ============================================================
+# HORARIO DEL RESTAURANTE (Venezuela UTC-4)
+# ============================================================
+def hora_venezuela() -> datetime.datetime:
+    utc_now = datetime.datetime.utcnow()
+    return utc_now + datetime.timedelta(hours=-4)
+
+def restaurante_abierto() -> bool:
+    """Retorna True si el restaurante está abierto (7:00 AM – 12:00 AM)."""
+    hora = hora_venezuela().hour
+    return HORA_APERTURA <= hora <= 23  # 7 AM a 11:59 PM (medianoche)
+
+def mensaje_cerrado() -> str:
+    return (
+        "¡Hola! 😊 En este momento estamos cerrados. 🌙\n"
+        "Nuestro horario es *7:00 AM – 12:00 AM* (medianoche).\n"
+        "Escríbenos de nuevo cuando abramos. ¡Te esperamos! 🍔"
+    )
+
+# ============================================================
 # MENÚ EN TEXTO (para el prompt de la IA)
 # ============================================================
-def obtener_menu_texto():
+def obtener_menu_texto() -> str:
     session = Session()
     items = session.query(Producto).all()
+    tasa = obtener_tasa_bcv()
     lineas = []
     for item in items:
         estado = "✅ disponible" if (item.disponible and item.stock > 0) else "❌ agotado"
-        lineas.append(f"- {item.nombre} (${item.precio:.2f}) [{estado}]: {item.descripcion}")
+        bs_str = f" = {precio_en_bs(item.precio)}" if tasa else ""
+        lineas.append(f"- {item.nombre} (${item.precio:.2f}{bs_str}) [{estado}]: {item.descripcion}")
     session.close()
     return "\n".join(lineas)
 
 # ============================================================
-# PROMPT DEL SISTEMA — LA PERSONALIDAD DEL BOT
+# PROMPT DINÁMICO DEL SISTEMA
 # ============================================================
-SYSTEM_PROMPT = f"""
+def get_system_prompt() -> str:
+    tasa = obtener_tasa_bcv()
+    tasa_str = f"{tasa:,.2f} Bs por 1 USD" if tasa else "no disponible en este momento"
+
+    return f"""
 Eres "Chefy", el asistente virtual de WhatsApp del Restaurante La Buena Mesa.
 Tu misión es atender a los clientes de forma cálida, amigable y profesional.
 
 REGLAS IMPORTANTES:
 - Responde SIEMPRE en español.
-- Tus respuestas deben ser CORTAS y CONCISAS. Máximo 3-4 líneas por mensaje. Nada de párrafos interminables.
-- Usa emojis con moderación para que el chat se vea más dinámico 🍔✨
-- Si el cliente pregunta por un plato, explícalo brevemente y con entusiasmo para animarlo a pedirlo.
-- Si el cliente menciona un presupuesto, recomiéndale los platos que mejor se ajusten a ese precio.
-- Si el cliente quiere hacer un pedido, confirma qué plato quiere y luego cierra con algo como "¡Perfecto! Tu pedido ya está en camino 🚀"
-- Si el pedido es de un producto AGOTADO, discúlpate brevemente y ofrece dos alternativas del menú.
-- No inventes platos ni precios. Solo usa los del menú oficial que se te muestra abajo.
-- Si el cliente dice "hola", "buenas", etc., salúdalo de vuelta y pregúntale en qué puedes ayudarlo.
-- No respondas preguntas que no tengan que ver con el restaurante o la comida. Di amablemente que solo puedes ayudar con el menú.
+- Tus respuestas deben ser CORTAS y CONCISAS. Máximo 3-4 líneas por mensaje.
+- Usa emojis con moderación 🍔✨
+- Si el cliente pregunta por un plato, explícalo brevemente con entusiasmo.
+- Si el cliente menciona un presupuesto, recomiéndele los platos que mejor se ajusten.
+- Muestra SIEMPRE los precios en USD y en Bolívares (Bs) usando la tasa BCV del día.
+- Si el cliente quiere pagar, comparte los datos de Pago Móvil y pídele que envíe el comprobante.
+- Si el pedido es de un producto AGOTADO, discúlpate y ofrece dos alternativas.
+- No inventes platos ni precios. Solo usa los del menú oficial.
+- Si el cliente dice "hola", "buenas", etc., salúdalo y pregúntale en qué puedes ayudarlo.
+- No respondas preguntas ajenas al restaurante.
+
+HORARIO:
+- Lunes a Domingo: 7:00 AM – 12:00 AM (medianoche)
+
+TASA BCV DEL DÍA:
+- 1 USD = {tasa_str}
+
+DATOS DE PAGO MÓVIL (compartir cuando el cliente quiera pagar):
+- 📱 Teléfono: {PAGO_MOVIL['telefono']}
+- 🪪 Cédula: {PAGO_MOVIL['cedula']}
+- 🏦 Banco: {PAGO_MOVIL['banco']}
+- Una vez que el cliente pague, pídele que envíe el comprobante de pago.
 
 MENÚ OFICIAL DE LA BUENA MESA (actualizado en tiempo real):
 {obtener_menu_texto()}
@@ -105,39 +190,33 @@ MENÚ OFICIAL DE LA BUENA MESA (actualizado en tiempo real):
 # ============================================================
 # HISTORIAL DE CONVERSACIÓN POR USUARIO (en memoria)
 # ============================================================
-# historial_usuarios = { "584243225660": [{"role": "user", "parts": "..."}, ...] }
 historial_usuarios = {}
 
 def obtener_respuesta_ia(numero_cliente: str, mensaje_usuario: str) -> str:
     """Envía el mensaje al modelo LLaMA 3 via Groq y retorna la respuesta."""
     try:
-        # Inicializar historial si el usuario es nuevo
         if numero_cliente not in historial_usuarios:
             historial_usuarios[numero_cliente] = []
 
-        # Agregar el mensaje del usuario al historial
         historial_usuarios[numero_cliente].append({
             "role": "user",
             "content": mensaje_usuario
         })
 
-        # Limitar historial a los últimos 10 turnos para no gastar tokens
         historial_recortado = historial_usuarios[numero_cliente][-10:]
 
-        # Construir los mensajes con el system prompt al inicio
-        mensajes = [{"role": "system", "content": SYSTEM_PROMPT}] + historial_recortado
+        # System prompt con tasa BCV en tiempo real
+        mensajes = [{"role": "system", "content": get_system_prompt()}] + historial_recortado
 
-        # Llamar a la API de Groq
         completion = client_groq.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=mensajes,
-            max_tokens=300,
+            max_tokens=350,
             temperature=0.7
         )
 
         texto_respuesta = completion.choices[0].message.content.strip()
 
-        # Agregar la respuesta al historial
         historial_usuarios[numero_cliente].append({
             "role": "assistant",
             "content": texto_respuesta
@@ -153,10 +232,6 @@ def obtener_respuesta_ia(numero_cliente: str, mensaje_usuario: str) -> str:
 # MANEJO DE PEDIDOS EN LA BASE DE DATOS
 # ============================================================
 def procesar_pedido_db(nombre_plato: str) -> str | None:
-    """
-    Si el texto del usuario menciona un plato del menú, descuenta 1 del stock.
-    Retorna un mensaje extra si el plato estaba agotado, o None si todo está ok.
-    """
     session = Session()
     producto = session.query(Producto).filter(
         Producto.nombre.ilike(f"%{nombre_plato}%"),
@@ -219,8 +294,7 @@ async def recibir_mensaje(request: Request):
         numero_cliente = mensaje_obj['from']
         texto_usuario  = mensaje_obj['text']['body']
 
-        # Limpiar código de país Venezuela +58 si viene con prefijo extra
-        # (aplica también a México +521 y Argentina +549 por si acaso)
+        # Normalizar prefijos Venezuela/México/Argentina
         if numero_cliente.startswith("521"):
             numero_cliente = "52" + numero_cliente[3:]
         elif numero_cliente.startswith("549"):
@@ -228,14 +302,16 @@ async def recibir_mensaje(request: Request):
 
         print(f"\n📩 [{numero_cliente}]: {texto_usuario}")
 
+        # ⏰ Verificar horario antes de responder con IA
+        if not restaurante_abierto():
+            enviar_whatsapp(numero_cliente, mensaje_cerrado())
+            return {"status": "ok"}
+
         # Obtener respuesta de la IA
         respuesta = obtener_respuesta_ia(numero_cliente, texto_usuario)
-
-        # Enviar respuesta al cliente
         enviar_whatsapp(numero_cliente, respuesta)
 
     except KeyError:
-        # Meta envía notificaciones de lectura/estado — las ignoramos silenciosamente
         pass
     except Exception as e:
         print(f"❌ Error en webhook: {e}")
