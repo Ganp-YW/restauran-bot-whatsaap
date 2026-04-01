@@ -1,0 +1,5 @@
+fastapi==0.135.3
+groq==1.1.2
+requests==2.33.1
+SQLAlchemy==2.0.48
+uvicorn==0.42.0
