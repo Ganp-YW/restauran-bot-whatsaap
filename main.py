@@ -1,25 +1,25 @@
 from fastapi import FastAPI, Request, Response, Query
 import requests
+import os
 from groq import Groq
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 # ============================================================
-# CONFIGURACIÓN — RELLENA ESTOS VALORES
+# CONFIGURACIÓN — leída desde variables de entorno de Render
 # ============================================================
-TOKEN_WHATSAPP = "EAAV2QTxkfsMBRFjp3NboeWNzH4DNVykVdy0NLTzNsZCQNBckfNvKt7KC76GvYVDvTEt4EBITUopVePnTFXMrqPF9LK01CDncsBFB4o1SZCkDj4T0QjHbPDpnkgnZB4hWRRDyK1tXHyU9WlZBvOdiwMUuSZALBwQz7zkhqh0ZAwtNvBXDzc5BDXIMjwQNY6Vx8zUNmZCSOjQccY7BXaQNc2LKnE1I5JaJ2EMsu2Sa1f0ZBHi0cDIgYBqRfMlNOmCvw8gBEfbQDBmBmxlvc3RTmnyW"
-ID_TELEFONO  = "1030433120159344"
-VERIFY_TOKEN = "mi_token_secreto_123"
-API_URL      = f"https://graph.facebook.com/v18.0/{ID_TELEFONO}/messages"
-
-# Obtén tu API Key GRATIS en: https://console.groq.com/keys
-GROQ_API_KEY = "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"
+TOKEN_WHATSAPP = os.environ.get("TOKEN_WHATSAPP", "")
+ID_TELEFONO    = os.environ.get("ID_TELEFONO", "")
+VERIFY_TOKEN   = os.environ.get("VERIFY_TOKEN", "mi_token_secreto_123")
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
+API_URL        = f"https://graph.facebook.com/v18.0/{ID_TELEFONO}/messages"
 
 # ============================================================
 # CONFIGURAR GROQ
 # ============================================================
 client_groq = Groq(api_key=GROQ_API_KEY)
+
 
 # ============================================================
 # BASE DE DATOS — SQLAlchemy
