@@ -81,14 +81,15 @@ poblar_db()
 # ============================================================
 # TASA BCV EN TIEMPO REAL (caché de 1 hora)
 # ============================================================
-_cache_bcv = {"tasa": None, "timestamp": 0}
+_cache_bcv = {"tasa": 0.0, "timestamp": 0}
 
-def obtener_tasa_bcv() -> float | None:
+def obtener_tasa_bcv() -> float:
     """Obtiene la tasa oficial BCV USD→Bs desde la API pública. Se cachea 1 hora."""
     global _cache_bcv
     ahora = time.time()
 
-    if _cache_bcv["tasa"] and (ahora - _cache_bcv["timestamp"]) < 3600:
+    # Usar caché si no ha pasado 1 hora, INCLUSO si falló la vez pasada (para no bloquear)
+    if (ahora - _cache_bcv["timestamp"]) < 3600:
         return _cache_bcv["tasa"]
 
     try:
@@ -97,18 +98,16 @@ def obtener_tasa_bcv() -> float | None:
         tasa = float(data.get("venta") or data.get("promedio") or 0)
         if tasa > 0:
             _cache_bcv["tasa"] = tasa
-            _cache_bcv["timestamp"] = ahora
-            print(f"💱 Tasa BCV actualizada: {tasa:.2f} Bs/USD")
-            return tasa
     except Exception as e:
-        print(f"⚠️ No se pudo obtener tasa BCV: {e}")
+        print(f"Aviso - Error API BCV: {e}")
+    
+    # Marcar timestamp aunque haya fallado, así no sigue intentando cada segundo
+    _cache_bcv["timestamp"] = ahora
+    return _cache_bcv["tasa"]
 
-    return _cache_bcv["tasa"]  # retorna última tasa cacheada si falla
-
-def precio_en_bs(usd: float) -> str:
-    """Convierte un precio en USD a Bolívares usando la tasa BCV del día."""
-    tasa = obtener_tasa_bcv()
-    if tasa:
+def precio_en_bs(usd: float, tasa: float) -> str:
+    """Convierte un precio en USD a Bolívares usando la tasa proporcionada."""
+    if tasa > 0:
         bs = usd * tasa
         return f"Bs. {bs:,.2f}"
     return "N/D"
@@ -135,14 +134,13 @@ def mensaje_cerrado() -> str:
 # ============================================================
 # MENÚ EN TEXTO (para el prompt de la IA)
 # ============================================================
-def obtener_menu_texto() -> str:
+def obtener_menu_texto(tasa: float) -> str:
     session = Session()
     items = session.query(Producto).all()
-    tasa = obtener_tasa_bcv()
     lineas = []
     for item in items:
         estado = "✅ disponible" if (item.disponible and item.stock > 0) else "❌ agotado"
-        bs_str = f" = {precio_en_bs(item.precio)}" if tasa else ""
+        bs_str = f" = {precio_en_bs(item.precio, tasa)}" if tasa > 0 else ""
         lineas.append(f"- {item.nombre} (${item.precio:.2f}{bs_str}) [{estado}]: {item.descripcion}")
     session.close()
     return "\n".join(lineas)
@@ -152,7 +150,7 @@ def obtener_menu_texto() -> str:
 # ============================================================
 def get_system_prompt() -> str:
     tasa = obtener_tasa_bcv()
-    tasa_str = f"{tasa:,.2f} Bs por 1 USD" if tasa else "no disponible en este momento"
+    tasa_str = f"{tasa:,.2f} Bs por 1 USD" if tasa > 0 else "no disponible en este momento"
 
     return f"""
 Eres "Chefy", el asistente virtual de WhatsApp del Restaurante La Buena Mesa.
@@ -184,7 +182,7 @@ DATOS DE PAGO MÓVIL (compartir cuando el cliente quiera pagar):
 - Una vez que el cliente pague, pídele que envíe el comprobante de pago.
 
 MENÚ OFICIAL DE LA BUENA MESA (actualizado en tiempo real):
-{obtener_menu_texto()}
+{obtener_menu_texto(tasa)}
 """
 
 # ============================================================
