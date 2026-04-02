@@ -11,11 +11,7 @@ from sqlalchemy.orm import sessionmaker
 # ============================================================
 # CONFIGURACIÓN — leída desde variables de entorno de Render
 # ============================================================
-TOKEN_WHATSAPP = os.environ.get("TOKEN_WHATSAPP", "")
-ID_TELEFONO    = os.environ.get("ID_TELEFONO", "")
-VERIFY_TOKEN   = os.environ.get("VERIFY_TOKEN", "mi_token_secreto_123")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
-API_URL        = f"https://graph.facebook.com/v18.0/{ID_TELEFONO}/messages"
 
 # Pago móvil del restaurante
 PAGO_MOVIL = {
@@ -280,85 +276,44 @@ def registrar_pago_google_form(telefono: str, monto: str, referencia: str, detal
         print(f"❌ Error guardando pago en Excel: {e}")
 
 # ============================================================
-# ENVIAR MENSAJE POR WHATSAPP
-# ============================================================
-def enviar_whatsapp(numero: str, texto: str):
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": numero,
-        "type": "text",
-        "text": {"body": texto}
-    }
-    headers = {
-        "Authorization": f"Bearer {TOKEN_WHATSAPP}",
-        "Content-Type": "application/json"
-    }
-    response = requests.post(API_URL, json=payload, headers=headers)
-    if response.status_code != 200:
-        print(f"❌ Error de Meta API: {response.text}")
-    else:
-        print(f"✅ Respuesta enviada a {numero}")
-
-# ============================================================
-# FASTAPI APP
+# FASTAPI APP (Integración Android)
 # ============================================================
 app = FastAPI()
 
-@app.get("/webhook")
-async def verificar_token(
-    mode:      str = Query(None, alias="hub.mode"),
-    token:     str = Query(None, alias="hub.verify_token"),
-    challenge: str = Query(None, alias="hub.challenge")
-):
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("✅ Webhook verificado por Meta.")
-        return Response(content=challenge, media_type="text/plain")
-    return Response(content="Token inválido", status_code=403)
-
-@app.post("/webhook")
-async def recibir_mensaje(request: Request):
-    data = await request.json()
+@app.post("/whatsauto")
+async def whatsauto_webhook(request: Request):
+    """
+    Endpoint dedicado para la app de Android (AutoResponder / WhatsAuto).
+    No usa Meta API. Recibe el texto, la IA lo procesa, y devuelve un JSON.
+    """
     try:
-        mensaje_obj    = data['entry'][0]['changes'][0]['value']['messages'][0]
-        numero_cliente = mensaje_obj['from']
-        tipo_mensaje   = mensaje_obj.get('type')
-
-        # Normalizar prefijos Venezuela/México/Argentina
-        if numero_cliente.startswith("521"):
-            numero_cliente = "52" + numero_cliente[3:]
-        elif numero_cliente.startswith("549"):
-            numero_cliente = "54" + numero_cliente[3:]
-
-        # Manejar imágenes (comprobantes de pago)
-        if tipo_mensaje == 'image':
-            print(f"\n📸 [{numero_cliente}] envió una imagen (posible comprobante).")
-            texto_usuario = "[IMAGEN RECIBIDA: Comprobante de pago]"
+        data = await request.json()
         
-        # Ignorar formatos no soportados por Chefy
-        elif tipo_mensaje != 'text':
-            enviar_whatsapp(numero_cliente, "Por ahora solo puedo leer mensajes de texto y ver imágenes de pagos. 😅 ¡Dime en texto en qué te ayudo!")
-            return {"status": "ok"}
+        # Extraer texto y número dependiendo del formato de la app
+        texto_usuario = data.get("message", "")
+        if not texto_usuario:
+            texto_usuario = data.get("query", "") # Autoresponder usa "query" a veces
             
-        else:
-            # Si es texto normal, extraerlo
-            texto_usuario = mensaje_obj['text']['body']
-            print(f"\n📩 [{numero_cliente}]: {texto_usuario}")
+        numero_cliente = data.get("sender", "Desconocido")
+        if "phone" in data:
+            numero_cliente = data["phone"]
+            
+        print(f"\n📱 [App Android] 📩 [{numero_cliente}]: {texto_usuario}")
 
-        # ⏰ Verificar horario antes de responder con IA
+        # ⏰ Verificar horario
         if not restaurante_abierto():
-            enviar_whatsapp(numero_cliente, mensaje_cerrado())
-            return {"status": "ok"}
+            print(f"✅ Respuesta devuelta (Cerrado) a {numero_cliente}")
+            return {"reply": mensaje_cerrado()}
 
-        # Obtener respuesta de la IA
+        # 🧠 Procesar con Groq
         respuesta = obtener_respuesta_ia(numero_cliente, texto_usuario)
-        enviar_whatsapp(numero_cliente, respuesta)
+        
+        print(f"✅ Respuesta devuelta a {numero_cliente} vía Android")
+        return {"reply": respuesta}
 
-    except KeyError:
-        pass
     except Exception as e:
-        print(f"❌ Error en webhook: {e}")
-
-    return {"status": "ok"}
+        print(f"❌ Error en webhook Android: {e}")
+        return {"reply": "¡Ups! Tuvimos un error procesando tu mensaje."}
 
 if __name__ == "__main__":
     import uvicorn
