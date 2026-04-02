@@ -148,6 +148,16 @@ async function connectToWhatsApp() {
             console.log('❌ Conexión cerrada. Reconectando:', shouldReconnect);
             if (shouldReconnect) {
                 setTimeout(connectToWhatsApp, 3000);
+            } else {
+                console.log('⚠️ Sesión inválida o cerrada desde el celular.');
+                console.log('🧹 Limpiando MongoDB para pedir un nuevo QR...');
+                mongoose.connection.db.collection('baileys_session').deleteMany({}).then(() => {
+                    console.log('✅ BD limpia. Reiniciando proceso para sacar QR fresquito...');
+                    process.exit(1); // Force Render to restart and spin up the QR
+                }).catch(err => {
+                    console.error('Error limpiando BD:', err);
+                    process.exit(1);
+                });
             }
         } else if (connection === 'open') {
             console.log('🤖 Chefy (Node.js + Baileys) está conectado y listo para recibir mensajes!');
