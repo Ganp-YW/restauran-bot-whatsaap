@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
 const { useMongoAuthState } = require('./mongoAuth');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -122,7 +122,7 @@ async function connectToWhatsApp() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'warn' }), 
-        browser: ["Chefy Bot", "Edge", "1.0.0"]
+        browser: Browsers.ubuntu('Chrome')
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -139,7 +139,8 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('❌ Conexión cerrada. Error:', lastDisconnect.error?.message, 'Reconectando:', shouldReconnect);
+            console.log('🔴 CAUSA EXACTA DE DESCONEXIÓN:', lastDisconnect.error?.message || lastDisconnect.error || 'Ninguna');
+            console.log('❌ Conexión cerrada. Reconectando:', shouldReconnect);
             if (shouldReconnect) {
                 setTimeout(connectToWhatsApp, 3000);
             }
