@@ -120,8 +120,8 @@ async function connectToWhatsApp() {
     console.log("Iniciando cliente ligero de WhatsApp (Baileys)...");
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // Lo dibujamos manual para aplicar {small: true}
-        logger: pino({ level: 'silent' }), // Evita que llene los logs de Render con ruido
+        printQRInTerminal: false,
+        logger: pino({ level: 'warn' }), 
         browser: ["Chefy Bot", "Edge", "1.0.0"]
     });
 
@@ -139,9 +139,8 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('❌ Conexión cerrada. Reconectando: ', shouldReconnect);
+            console.log('❌ Conexión cerrada. Error:', lastDisconnect.error?.message, 'Reconectando:', shouldReconnect);
             if (shouldReconnect) {
-                // Pequeña pausa antes de intentar reconectar
                 setTimeout(connectToWhatsApp, 3000);
             }
         } else if (connection === 'open') {
