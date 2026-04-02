@@ -17,7 +17,7 @@ async function useMongoAuthState(sessionName) {
 
     const readData = async (id) => {
         const doc = await AuthModel.findById(`${sessionName}-${id}`).lean();
-        if (!doc) return null;
+        if (!doc) return undefined;
         return JSON.parse(doc.data, BufferJSON.reviver);
     };
 

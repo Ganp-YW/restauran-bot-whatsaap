@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { useMongoAuthState } = require('./mongoAuth');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -116,9 +116,14 @@ async function connectToWhatsApp() {
     
     // Configurar Auth con MongoDB persistente
     const { state, saveCreds } = await useMongoAuthState('bot-session');
+    
+    console.log("Obteniendo la versión más reciente de WhatsApp Web...");
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`Usando versión WA v${version.join('.')}, isLatest: ${isLatest}`);
 
     console.log("Iniciando cliente ligero de WhatsApp (Baileys)...");
     const sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'warn' }), 
