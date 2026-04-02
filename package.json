@@ -4,7 +4,7 @@
   "description": "WhatsApp Bot con Node.js y MongoDB",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node --max-old-space-size=256 index.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
