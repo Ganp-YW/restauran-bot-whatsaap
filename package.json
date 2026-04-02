@@ -4,17 +4,16 @@
   "description": "WhatsApp Bot con Node.js y MongoDB",
   "main": "index.js",
   "scripts": {
-    "start": "node --max-old-space-size=256 index.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "start": "node index.js"
   },
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "pino": "^8.20.0",
     "axios": "^1.6.8",
     "groq-sdk": "^0.3.2",
     "mongoose": "^8.2.3",
     "qrcode-terminal": "^0.12.0",
     "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
-    "whatsapp-web.js": "^1.23.1",
-    "wwebjs-mongo": "^1.1.0"
+    "sqlite3": "^5.1.7"
   }
 }

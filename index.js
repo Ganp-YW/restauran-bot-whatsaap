@@ -1,7 +1,8 @@
-const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { default: makeWASocket, DisconnectReason } = require('@whiskeysockets/baileys');
+const { useMongoAuthState } = require('./mongoAuth');
+const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const mongoose = require('mongoose');
-const { MongoStore } = require('wwebjs-mongo');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const axios = require('axios');
@@ -109,81 +110,80 @@ async function registrarPagoGoogleForm(telefono, monto, referencia, detalle) {
     }
 }
 
-async function main() {
-    if (!MONGODB_URI) {
-        console.error("FALTA MONGODB_URI en las variables de entorno");
-        return;
-    }
+async function connectToWhatsApp() {
+    console.log("Conectando a MongoDB para sesión de Baileys...");
+    await mongoose.connect(MONGODB_URI);
+    
+    // Configurar Auth con MongoDB persistente
+    const { state, saveCreds } = await useMongoAuthState('bot-session');
 
-    dbPromise = open({
-        filename: './restaurante.db',
-        driver: sqlite3.Database
+    console.log("Iniciando cliente ligero de WhatsApp (Baileys)...");
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false, // Lo dibujamos manual para aplicar {small: true}
+        logger: pino({ level: 'silent' }), // Evita que llene los logs de Render con ruido
+        browser: ["Chefy Bot", "Edge", "1.0.0"]
     });
 
-    console.log("Conectando a MongoDB para sesión...");
-    await mongoose.connect(MONGODB_URI);
-    const store = new MongoStore({ mongoose: mongoose });
+    sock.ev.on('creds.update', saveCreds);
 
-    console.log("Iniciando cliente de WhatsApp...");
-    const client = new Client({
-        authStrategy: new RemoteAuth({
-            store: store,
-            backupSyncIntervalMs: 300000
-        }),
-        puppeteer: {
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ],
-            headless: true
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            console.log('\n=======================================');
+            console.log('❗️ ESCANEA ESTE CÓDIGO QR RÁPIDAMENTE ❗️');
+            qrcode.generate(qr, {small: true});
+            console.log('=======================================\n');
+        }
+
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut);
+            console.log('❌ Conexión cerrada. Reconectando: ', shouldReconnect);
+            if (shouldReconnect) {
+                // Pequeña pausa antes de intentar reconectar
+                setTimeout(connectToWhatsApp, 3000);
+            }
+        } else if (connection === 'open') {
+            console.log('🤖 Chefy (Node.js + Baileys) está conectado y listo para recibir mensajes!');
+            console.log('✅ Sesión blindada y guardada en MongoDB.');
         }
     });
 
-    client.on('qr', (qr) => {
-        console.log('\n=======================================');
-        console.log('❗️ ESCANEA ESTE CÓDIGO QR RÁPIDAMENTE ❗️');
-        qrcode.generate(qr, {small: true});
-        console.log('=======================================\n');
-    });
+    sock.ev.on('messages.upsert', async (m) => {
+        const mensajesNuevos = m.messages;
+        if (!mensajesNuevos || mensajesNuevos.length === 0) return;
 
-    client.on('remote_session_saved', () => {
-        console.log('✅ Sesión guardada en MongoDB correctamente. ¡Sobrevivirá a los reinicios!');
-    });
+        const msg = mensajesNuevos[0];
+        
+        // Evitarnos a nosotros mismos u otros broadcasts
+        if (!msg.message || msg.key.fromMe) return;
 
-    client.on('ready', () => {
-        console.log('🤖 Chefy (Node.js) está conectado y listo para recibir mensajes!');
-    });
+        const remoteJid = msg.key.remoteJid;
+        
+        // Parsear el texto según sea mensaje simple o extendido
+        const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
 
-    client.on('message', async (msg) => {
-        const num = msg.from;
-        let texto = msg.body;
+        // Ignorar si no hay texto (imágenes, audios sin captura, estados)
+        if (!texto) return;
 
-        // Ignorar estados, mensajes de sistema o llamadas
-        if (msg.isStatus || msg.type !== 'chat') return;
-
-        console.log(`\n📩 [${num}]: ${texto}`);
+        console.log(`\n📩 [${remoteJid}]: ${texto}`);
 
         if (!restauranteAbierto()) {
-            msg.reply("¡Hola! 😊 En este momento estamos cerrados. 🌙\nNuestro horario es de 7:00 AM – 12:00 AM.\n¡Escríbenos cuando abramos! 🍔");
+            await sock.sendMessage(remoteJid, { text: "¡Hola! 😊 En este momento estamos cerrados. 🌙\nNuestro horario es de 7:00 AM – 12:00 AM.\n¡Escríbenos cuando abramos! 🍔" });
             return;
         }
 
         try {
-            if (!historialUsuarios[num]) historialUsuarios[num] = [];
-            historialUsuarios[num].push({ role: "user", content: texto });
-            const recortes = historialUsuarios[num].slice(-10);
+            if (!historialUsuarios[remoteJid]) historialUsuarios[remoteJid] = [];
+            historialUsuarios[remoteJid].push({ role: "user", content: texto });
+            const recortes = historialUsuarios[remoteJid].slice(-10);
             
             const prompt = await getSystemPrompt();
-            const mensajes = [{ role: "system", content: prompt }, ...recortes];
+            const mensajesGroq = [{ role: "system", content: prompt }, ...recortes];
 
             const chatCompletion = await groq.chat.completions.create({
-                messages: mensajes,
+                messages: mensajesGroq,
                 model: "llama-3.3-70b-versatile",
                 temperature: 0.7,
                 max_tokens: 350
@@ -195,20 +195,34 @@ async function main() {
             const match = respuestaStr.match(/\[GUARDAR_PAGO\|(.*?)\|(.*?)\|(.*?)\]/);
             if (match) {
                 const [_, ref, monto, detalle] = match;
-                await registrarPagoGoogleForm(num, monto.trim(), ref.trim(), detalle.trim());
+                await registrarPagoGoogleForm(remoteJid, monto.trim(), ref.trim(), detalle.trim());
                 respuestaStr = respuestaStr.replace(/\[GUARDAR_PAGO.*?\]/, '').trim();
             }
 
-            historialUsuarios[num].push({ role: "assistant", content: respuestaStr });
-            msg.reply(respuestaStr);
+            historialUsuarios[remoteJid].push({ role: "assistant", content: respuestaStr });
+            
+            // Responder con Baileys
+            await sock.sendMessage(remoteJid, { text: respuestaStr });
 
         } catch (error) {
-            console.error("Error pidiendo a Groq:", error.message);
-            msg.reply("¡Ups! Tuve un pequeño problema técnico. 😅 ¿Puedes repetir tu mensaje?");
+            console.error("Error pidiendo a Groq o enviando mensaje:", error.message);
+            await sock.sendMessage(remoteJid, { text: "¡Ups! Tuve un pequeño problema técnico. 😅 ¿Puedes repetir tu mensaje?" });
         }
     });
+}
 
-    client.initialize();
+async function main() {
+    if (!MONGODB_URI) {
+        console.error("FALTA MONGODB_URI en las variables de entorno");
+        return;
+    }
+
+    dbPromise = open({
+        filename: './restaurante.db',
+        driver: sqlite3.Database
+    });
+
+    connectToWhatsApp();
 }
 
 main().catch(console.error);
@@ -219,6 +233,6 @@ main().catch(console.error);
 const http = require('http');
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot de WhatsApp funcionando 24/7');
+    res.end('Bot de WhatsApp (Baileys) funcionando 24/7');
 }).listen(process.env.PORT || 3000);
 console.log("Servidor HTTP escuchando para evitar caídas de Render (Puerto 3000)");
