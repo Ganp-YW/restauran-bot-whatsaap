@@ -55,7 +55,7 @@ async function obtenerMenuTexto(tasa) {
     let lineas = [];
     for (let item of items) {
         const estado = (item.disponible && item.stock > 0) ? "✅ disponible" : "❌ agotado";
-        const bs_str = tasa > 0 ? ` = Bs. ${(item.precio * tasa).toLocaleString('es-VE', {minimumFractionDigits: 2})}` : "";
+        const bs_str = tasa > 0 ? ` = Bs. ${(item.precio * tasa).toLocaleString('es-VE', { minimumFractionDigits: 2 })}` : "";
         lineas.push(`- ${item.nombre} ($${item.precio.toFixed(2)}${bs_str}) [${estado}]: ${item.descripcion}`);
     }
     return lineas.join("\n");
@@ -63,7 +63,7 @@ async function obtenerMenuTexto(tasa) {
 
 async function getSystemPrompt() {
     const tasa = await obtenerTasaBcv();
-    const tasa_str = tasa > 0 ? `${tasa.toLocaleString('es-VE', {minimumFractionDigits: 2})} Bs por 1 USD` : "no disponible";
+    const tasa_str = tasa > 0 ? `${tasa.toLocaleString('es-VE', { minimumFractionDigits: 2 })} Bs por 1 USD` : "no disponible";
     const menu = await obtenerMenuTexto(tasa);
 
     return `Eres "Chefy", el asistente virtual de WhatsApp del Restaurante La Buena Mesa.
@@ -113,10 +113,10 @@ async function registrarPagoGoogleForm(telefono, monto, referencia, detalle) {
 async function connectToWhatsApp() {
     console.log("Conectando a MongoDB para sesión de Baileys...");
     await mongoose.connect(MONGODB_URI);
-    
+
     // Configurar Auth con MongoDB persistente
     const { state, saveCreds } = await useMongoAuthState('bot-session');
-    
+
     console.log("Obteniendo la versión más reciente de WhatsApp Web...");
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`Usando versión WA v${version.join('.')}, isLatest: ${isLatest}`);
@@ -126,7 +126,7 @@ async function connectToWhatsApp() {
         version,
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'warn' }), 
+        logger: pino({ level: 'warn' }),
         browser: Browsers.ubuntu('Chrome')
     });
 
@@ -134,11 +134,11 @@ async function connectToWhatsApp() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-        
+
         if (qr) {
             console.log('\n=======================================');
             console.log('❗️ ESCANEA ESTE CÓDIGO QR RÁPIDAMENTE ❗️');
-            qrcode.generate(qr, {small: true});
+            qrcode.generate(qr, { small: true });
             console.log('=======================================\n');
         }
 
@@ -170,12 +170,12 @@ async function connectToWhatsApp() {
         if (!mensajesNuevos || mensajesNuevos.length === 0) return;
 
         const msg = mensajesNuevos[0];
-        
+
         // Evitarnos a nosotros mismos u otros broadcasts
         if (!msg.message || msg.key.fromMe) return;
 
         const remoteJid = msg.key.remoteJid;
-        
+
         // Parsear el texto según sea mensaje simple o extendido
         const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
 
@@ -193,7 +193,7 @@ async function connectToWhatsApp() {
             if (!historialUsuarios[remoteJid]) historialUsuarios[remoteJid] = [];
             historialUsuarios[remoteJid].push({ role: "user", content: texto });
             const recortes = historialUsuarios[remoteJid].slice(-10);
-            
+
             const prompt = await getSystemPrompt();
             const mensajesGroq = [{ role: "system", content: prompt }, ...recortes];
 
@@ -215,7 +215,7 @@ async function connectToWhatsApp() {
             }
 
             historialUsuarios[remoteJid].push({ role: "assistant", content: respuestaStr });
-            
+
             // Responder con Baileys
             await sock.sendMessage(remoteJid, { text: respuestaStr });
 
