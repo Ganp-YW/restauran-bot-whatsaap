@@ -25,6 +25,8 @@ const PAGO_MOVIL = {
 const HORA_APERTURA = 7;
 const HORA_CIERRE = 24;
 
+let estadoForzadoLocal = null;
+
 const NUMERO_ADMIN = "584166436082@s.whatsapp.net";
 const pagosPendientes = {};
 const botMuteados = {};
@@ -75,6 +77,7 @@ async function obtenerTasaBcv() {
 }
 
 function restauranteAbierto() {
+    if (estadoForzadoLocal !== null) return estadoForzadoLocal;
     const hora = new Date().getUTCHours() - 4; // Venezuela UTC-4
     const horaLocal = hora < 0 ? hora + 24 : hora;
     return horaLocal >= HORA_APERTURA && horaLocal <= 23;
@@ -231,8 +234,13 @@ async function connectToWhatsApp() {
                     if (aprobarVote > 0) {
                         console.log(`✅ Dueño APROBÓ pago Ref: ${pagoData.referencia} mediante Encuesta`);
                         await registrarPagoGoogleForm(pagoData.clienteJid, pagoData.monto, pagoData.referencia, pagoData.detalle);
-                        await enviarMensajeBot(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
-                        await enviarMensajeBot(key.remoteJid, { text: `✅ El pago de la Ref: ${pagoData.referencia} ha sido APROBADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
+                        
+                        const ticketCliente = `╔══════════════════════════╗\n║     🥩 LA BUENA MESA      ║\n║   ¡RECIBO CONFIRMADO!     ║\n╚══════════════════════════╝\n👤 Cliente: ${pagoData.clienteJid.split('@')[0]}\n🔢 Ref: ${pagoData.referencia}\n💰 Pagado: ${pagoData.monto}\n\n🍳 Tu pedido ha ingresado a nuestra cocina. ¡En breve estará listo!`;
+                        await enviarMensajeBot(pagoData.clienteJid, { text: ticketCliente });
+                        
+                        const ticketCocina = `🔥 *TICKET DE COCINA* 🔥\nAprobado por: Caja Principal\n=================\n📋 *Detalle del Pedido:*\n${pagoData.detalle}\n=================\n📱 Contacto: ${pagoData.clienteJid.split('@')[0]}`;
+                        await enviarMensajeBot(key.remoteJid, { text: ticketCocina });
+                        
                         delete pagosPendientes[key.id];
                     } else if (rechazarVote > 0) {
                         console.log(`❌ Dueño RECHAZÓ pago Ref: ${pagoData.referencia} mediante Encuesta`);
@@ -299,8 +307,13 @@ async function connectToWhatsApp() {
                 if (decision.includes("aprobar") || decision.includes("si") || decision.includes("sí") || decision === "1") {
                     console.log(`✅ Dueño APROBÓ pago Ref: ${pagoData.referencia}`);
                     await registrarPagoGoogleForm(pagoData.clienteJid, pagoData.monto, pagoData.referencia, pagoData.detalle);
-                    await enviarMensajeBot(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
-                    await enviarMensajeBot(remoteJid, { text: `✅ El pago ha sido APROBADO correctamente. Se guardó en Google Forms y el cliente fue notificado.` });
+                    
+                    const ticketCliente = `╔══════════════════════════╗\n║     🥩 LA BUENA MESA      ║\n║   ¡RECIBO CONFIRMADO!     ║\n╚══════════════════════════╝\n👤 Cliente: ${pagoData.clienteJid.split('@')[0]}\n🔢 Ref: ${pagoData.referencia}\n💰 Pagado: ${pagoData.monto}\n\n🍳 Tu pedido ha ingresado a nuestra cocina. ¡En breve estará listo!`;
+                    await enviarMensajeBot(pagoData.clienteJid, { text: ticketCliente });
+                    
+                    const ticketCocina = `🔥 *TICKET DE COCINA* 🔥\nAprobado por: Caja Principal\n=================\n📋 *Detalle del Pedido:*\n${pagoData.detalle}\n=================\n📱 Contacto: ${pagoData.clienteJid.split('@')[0]}`;
+                    await enviarMensajeBot(remoteJid, { text: ticketCocina });
+                    
                     delete pagosPendientes[stanzaId];
                     return;
                 } else if (decision.includes("rechazar") || decision.includes("no") || decision === "0" || decision === "2") {
@@ -384,6 +397,34 @@ async function connectToWhatsApp() {
 
         const msg = mensajesNuevos[0];
         const remoteJid = msg.key.remoteJid;
+        const textoPlano = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+
+        // COMANDOS DE ADMINISTRADOR (Ocultos)
+        if (msg.key.fromMe && textoPlano.startsWith("/")) {
+            const comando = textoPlano.toLowerCase().trim();
+            if (comando === "/cerrar") {
+                estadoForzadoLocal = false;
+                await enviarMensajeBot(remoteJid, { text: "🔒 *BOT CERRADO* - No se aceptarán más pedidos." });
+                return;
+            } else if (comando === "/abrir") {
+                estadoForzadoLocal = true;
+                await enviarMensajeBot(remoteJid, { text: "🔓 *BOT ABIERTO* - Aceptando pedidos forzadamente." });
+                return;
+            } else if (comando === "/auto") {
+                estadoForzadoLocal = null;
+                await enviarMensajeBot(remoteJid, { text: "⏱️ *HORARIO RESTAURADO* - El bot vuelve al horario automático." });
+                return;
+            } else if (comando === "/silencio") {
+                botMuteados[remoteJid] = Date.now() + 60 * 60 * 1000;
+                await enviarMensajeBot(remoteJid, { text: "🔇 *SILENCIO TOTAL* - Bot silenciado en este chat por 1 hora." });
+                return;
+            } else if (comando === "/status") {
+                const modo = estadoForzadoLocal === null ? "Auto" : (estadoForzadoLocal ? "Abierto (Forzado)" : "Cerrado (Forzado)");
+                const mutes = Object.keys(botMuteados).filter(k => botMuteados[k] > Date.now()).length;
+                await enviarMensajeBot(remoteJid, { text: `📊 *STATUS CHEFY*\n- Estado: ${modo}\n- Chats Muteados: ${mutes}\n- Pagos Pendientes: ${Object.keys(pagosPendientes).length}` });
+                return;
+            }
+        }
 
         // --- SISTEMA DE SILENCIO (MUTE) POR CAJERA ---
         if (msg.key.fromMe) {
