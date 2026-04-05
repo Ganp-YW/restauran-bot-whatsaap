@@ -18,8 +18,15 @@ const PAGO_MOVIL = {
     cedula: "32468353",
     banco: "Banco de Venezuela (BDV)"
 };
+
+
+
+
 const HORA_APERTURA = 7;
 const HORA_CIERRE = 24;
+
+const NUMERO_ADMIN = "584166436082@s.whatsapp.net";
+const pagosPendientes = {};
 
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 let dbPromise;
@@ -61,12 +68,12 @@ async function obtenerMenuTexto(tasa) {
     return lineas.join("\n");
 }
 
-async function getSystemPrompt() {
+async function getSystemPrompt(remoteJid = "") {
     const tasa = await obtenerTasaBcv();
     const tasa_str = tasa > 0 ? `${tasa.toLocaleString('es-VE', { minimumFractionDigits: 2 })} Bs por 1 USD` : "no disponible";
     const menu = await obtenerMenuTexto(tasa);
 
-    return `Eres "Chefy", el asistente virtual de WhatsApp del Restaurante La Buena Mesa.
+    let basePrompt = `Eres "Chefy", el asistente virtual de WhatsApp del Restaurante La Buena Mesa.
 Tu misión es atender a los clientes de forma cálida, amigable y profesional.
 
 REGLAS IMPORTANTES:
@@ -89,6 +96,13 @@ DATOS PAGO MÓVIL:
 MENÚ OFICIAL:
 ${menu}
 `;
+
+    if (remoteJid.includes("4166436082")) {
+        basePrompt += `\n\n[AVISO DE SISTEMA]: EL USUARIO CON EL QUE ESTÁS HABLANDO AHORA MISMO ES EL DUEÑO Y ADMINISTRADOR DEL RESTAURANTE.
+Trátalo con respeto, NO le trates de vender comida a menos que él explícitamente diga que quiere hacer un pedido. Limítate a responder sus preguntas de forma directa y profesional.`;
+    }
+
+    return basePrompt;
 }
 
 // Historial en memoria 
@@ -184,6 +198,35 @@ async function connectToWhatsApp() {
 
         console.log(`\n📩 [${remoteJid}]: ${texto}`);
 
+        const isOwner = remoteJid.includes("4166436082");
+
+        // Lógica de validación manual por el Administrador
+        if (isOwner && msg.message?.extendedTextMessage?.contextInfo?.stanzaId) {
+            const stanzaId = msg.message.extendedTextMessage.contextInfo.stanzaId;
+            if (pagosPendientes[stanzaId]) {
+                const pagoData = pagosPendientes[stanzaId];
+                const decision = texto.toLowerCase().trim();
+                
+                if (decision.includes("aprobar") || decision.includes("si") || decision.includes("sí") || decision === "1") {
+                    console.log(`✅ Dueño APROBÓ pago Ref: ${pagoData.referencia}`);
+                    await registrarPagoGoogleForm(pagoData.clienteJid, pagoData.monto, pagoData.referencia, pagoData.detalle);
+                    await sock.sendMessage(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
+                    await sock.sendMessage(remoteJid, { text: `✅ El pago ha sido APROBADO correctamente. Se guardó en Google Forms y el cliente fue notificado.` });
+                    delete pagosPendientes[stanzaId];
+                    return;
+                } else if (decision.includes("rechazar") || decision.includes("no") || decision === "0" || decision === "2") {
+                    console.log(`❌ Dueño RECHAZÓ pago Ref: ${pagoData.referencia}`);
+                    await sock.sendMessage(pagoData.clienteJid, { text: `❌ Hubo un inconveniente con tu pago con referencia **${pagoData.referencia}**. Nuestro equipo revisó las cuentas y no logró verificarlo.\n\nPor favor, verifica los datos del comprobante y contáctanos si hubo algún error de transferencia.` });
+                    await sock.sendMessage(remoteJid, { text: `❌ El pago de la Ref: ${pagoData.referencia} ha sido RECHAZADO. El cliente fue notificado.` });
+                    delete pagosPendientes[stanzaId];
+                    return;
+                } else {
+                    await sock.sendMessage(remoteJid, { text: `⚠️ Por favor, responde (cita) el mensaje anterior indicando claramente "Aprobar" o "Rechazar".` });
+                    return;
+                }
+            }
+        }
+
         if (!restauranteAbierto()) {
             await sock.sendMessage(remoteJid, { text: "¡Hola! 😊 En este momento estamos cerrados. 🌙\nNuestro horario es de 7:00 AM – 12:00 AM.\n¡Escríbenos cuando abramos! 🍔" });
             return;
@@ -194,7 +237,7 @@ async function connectToWhatsApp() {
             historialUsuarios[remoteJid].push({ role: "user", content: texto });
             const recortes = historialUsuarios[remoteJid].slice(-10);
 
-            const prompt = await getSystemPrompt();
+            const prompt = await getSystemPrompt(remoteJid);
             const mensajesGroq = [{ role: "system", content: prompt }, ...recortes];
 
             const chatCompletion = await groq.chat.completions.create({
@@ -210,8 +253,24 @@ async function connectToWhatsApp() {
             const match = respuestaStr.match(/\[GUARDAR_PAGO\|(.*?)\|(.*?)\|(.*?)\]/);
             if (match) {
                 const [_, ref, monto, detalle] = match;
-                await registrarPagoGoogleForm(remoteJid, monto.trim(), ref.trim(), detalle.trim());
                 respuestaStr = respuestaStr.replace(/\[GUARDAR_PAGO.*?\]/, '').trim();
+                
+                // En lugar de guardar directo, enviamos notificacion en el mensaje del bot
+                respuestaStr += "\n\n⏳ *He enviado los datos de tu pago a nuestro personal para su validación manual. Te avisaremos por aquí tan pronto como lo verifiquen.*";
+
+                // Enviar aviso al Admin y guardar
+                const adminMsg = await sock.sendMessage(NUMERO_ADMIN, {
+                    text: `⚠️ *NUEVO PAGO EN ESPERA DE VERIFICACIÓN*\n\n📱 *Número:* ${remoteJid.split('@')[0]}\n💰 *Monto:* ${monto.trim()}\n🔢 *Referencia:* ${ref.trim()}\n📋 *Detalle:* ${detalle.trim()}\n\n👉 *DUEÑO:* Responde a este mensaje escribiendo "APROBAR" o "RECHAZAR" (Debes citar este mensaje).`
+                });
+
+                if (adminMsg && adminMsg.key && adminMsg.key.id) {
+                    pagosPendientes[adminMsg.key.id] = {
+                        clienteJid: remoteJid,
+                        monto: monto.trim(),
+                        referencia: ref.trim(),
+                        detalle: detalle.trim()
+                    };
+                }
             }
 
             historialUsuarios[remoteJid].push({ role: "assistant", content: respuestaStr });
