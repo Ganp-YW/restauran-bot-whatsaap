@@ -258,9 +258,18 @@ async function connectToWhatsApp() {
 
     async function procesarMensajeCliente(msg, remoteJid) {
         // Parsear el texto
-        let texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
+        let texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || "";
         const isImage = !!msg.message?.imageMessage;
         const locationMessage = msg.message?.locationMessage;
+
+        // BOTÓN DE PÁNICO (Alarma Humana)
+        const textoMin = texto.toLowerCase();
+        if (textoMin.includes("humano") || textoMin.includes("asesor ") || textoMin.includes("ayuda") || textoMin.includes("reclamo") || textoMin.includes("problema")) {
+            botMuteados[remoteJid] = Date.now() + 60 * 60 * 1000; // Silencia por 1 hora completa
+            await enviarMensajeBot(remoteJid, { text: "🚨 Entiendo que requieres soporte personalizado. Te estoy comunicando con un gerente real de nuestro negocio. Por favor, aguarda un instante en esta ventana." });
+            await enviarMensajeBot(NUMERO_ADMIN, { text: `🚨 *ALERTA DE ASISTENCIA HUMANA* 🚨\nEl número ${remoteJid.split('@')[0]} tiene un problema y pidió hablar con un humano.\n\n🤫 He silenciado automáticamente los mensajes automáticos en ese chat para que puedas intervenir.` });
+            return;
+        }
 
         // Si envían Ubicación GPS
         if (locationMessage) {
@@ -422,6 +431,20 @@ async function connectToWhatsApp() {
                 const modo = estadoForzadoLocal === null ? "Auto" : (estadoForzadoLocal ? "Abierto (Forzado)" : "Cerrado (Forzado)");
                 const mutes = Object.keys(botMuteados).filter(k => botMuteados[k] > Date.now()).length;
                 await enviarMensajeBot(remoteJid, { text: `📊 *STATUS CHEFY*\n- Estado: ${modo}\n- Chats Muteados: ${mutes}\n- Pagos Pendientes: ${Object.keys(pagosPendientes).length}` });
+                return;
+            } else if (comando.startsWith("/despacho")) {
+                const args = comando.split(" ");
+                if (args.length > 1) {
+                    let targetNumber = args[1].replace(/\D/g, ''); 
+                    if (!targetNumber.startsWith("58") && targetNumber.length === 10) targetNumber = "58" + targetNumber;
+                    
+                    const finalJid = `${targetNumber}@s.whatsapp.net`;
+                    const mensajeDespacho = `🛵 *¡Ring Ring!*\n\nNuestro repartidor de *La Buena Mesa* acaba de salir del restaurante con tu comida calientita.\n\n¡Atento a tu puerta! 😋`;
+                    await enviarMensajeBot(finalJid, { text: mensajeDespacho });
+                    await enviarMensajeBot(remoteJid, { text: `✅ Se notificó el despacho exitosamente al cliente: ${targetNumber}.` });
+                } else {
+                    await enviarMensajeBot(remoteJid, { text: "⚠️ Formato inválido. Usa: `/despacho numero` (Ej: /despacho 584161234567)" });
+                }
                 return;
             }
         }
