@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, Browsers, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, fetchLatestBaileysVersion, getAggregateVotesInPollMessage } = require('@whiskeysockets/baileys');
 const { useMongoAuthState } = require('./mongoAuth');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -179,6 +179,39 @@ async function connectToWhatsApp() {
         }
     });
 
+    sock.ev.on('messages.update', async (events) => {
+        for (const { key, update } of events) {
+            // Verificar si hay voto de encuesta y la encuesta corresponde a un pago pendiente
+            if (update.pollUpdates && pagosPendientes[key.id]) {
+                const pagoData = pagosPendientes[key.id];
+                try {
+                    const votes = getAggregateVotesInPollMessage({
+                        message: pagoData.originalMsg,
+                        pollUpdates: update.pollUpdates,
+                    });
+                    
+                    const aprobarVote = votes.find(v => v.name === "APROBAR ✅")?.voters.length || 0;
+                    const rechazarVote = votes.find(v => v.name === "RECHAZAR ❌")?.voters.length || 0;
+
+                    if (aprobarVote > 0) {
+                        console.log(`✅ Dueño APROBÓ pago Ref: ${pagoData.referencia} mediante Encuesta`);
+                        await registrarPagoGoogleForm(pagoData.clienteJid, pagoData.monto, pagoData.referencia, pagoData.detalle);
+                        await sock.sendMessage(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
+                        await sock.sendMessage(key.remoteJid, { text: `✅ El pago de la Ref: ${pagoData.referencia} ha sido APROBADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
+                        delete pagosPendientes[key.id];
+                    } else if (rechazarVote > 0) {
+                        console.log(`❌ Dueño RECHAZÓ pago Ref: ${pagoData.referencia} mediante Encuesta`);
+                        await sock.sendMessage(pagoData.clienteJid, { text: `❌ Hubo un inconveniente con tu pago con referencia **${pagoData.referencia}**. Nuestro equipo revisó las cuentas y no logró verificarlo.\n\nPor favor, verifica los datos del comprobante y contáctanos si hubo algún error de transferencia.` });
+                        await sock.sendMessage(key.remoteJid, { text: `❌ El pago de la Ref: ${pagoData.referencia} ha sido RECHAZADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
+                        delete pagosPendientes[key.id];
+                    }
+                } catch (err) {
+                    console.log("Error leyendo voto de encuesta:", err.message);
+                }
+            }
+        }
+    });
+
     sock.ev.on('messages.upsert', async (m) => {
         const mensajesNuevos = m.messages;
         if (!mensajesNuevos || mensajesNuevos.length === 0) return;
@@ -237,7 +270,7 @@ async function connectToWhatsApp() {
                     delete pagosPendientes[stanzaId];
                     return;
                 } else {
-                    await sock.sendMessage(remoteJid, { text: `⚠️ Por favor, responde (cita) el mensaje anterior indicando claramente "Aprobar" o "Rechazar".` });
+                    await sock.sendMessage(remoteJid, { text: `⚠️ Por favor, vota en la Encuesta, o responde este mensaje con "Aprobar" o "Rechazar".` });
                     return;
                 }
             }
@@ -274,17 +307,27 @@ async function connectToWhatsApp() {
                 // En lugar de guardar directo, enviamos notificacion en el mensaje del bot
                 respuestaStr += "\n\n⏳ *He enviado los datos de tu pago a nuestro personal para su validación manual. Te avisaremos por aquí tan pronto como lo verifiquen.*";
 
-                // Enviar aviso al Admin y guardar
-                const adminMsg = await sock.sendMessage(NUMERO_ADMIN, {
-                    text: `⚠️ *NUEVO PAGO EN ESPERA DE VERIFICACIÓN*\n\n📱 *Número:* ${remoteJid.split('@')[0]}\n💰 *Monto:* ${monto.trim()}\n🔢 *Referencia:* ${ref.trim()}\n📋 *Detalle:* ${detalle.trim()}\n\n👉 *DUEÑO:* Responde a este mensaje escribiendo "APROBAR" o "RECHAZAR" (Debes citar este mensaje).`
+                // Enviar detalle completo primero
+                await sock.sendMessage(NUMERO_ADMIN, {
+                    text: `⚠️ *NUEVO PAGO EN ESPERA DE VERIFICACIÓN*\n\n📱 *Número:* ${remoteJid.split('@')[0]}\n💰 *Monto:* ${monto.trim()}\n🔢 *Referencia:* ${ref.trim()}\n📋 *Detalle:* ${detalle.trim()}`
                 });
 
-                if (adminMsg && adminMsg.key && adminMsg.key.id) {
-                    pagosPendientes[adminMsg.key.id] = {
+                // Enviar la Encuesta debajo
+                const pollMsg = await sock.sendMessage(NUMERO_ADMIN, {
+                    poll: {
+                        name: `¿Validar el pago Ref: ${ref.trim()}?`,
+                        values: ["APROBAR ✅", "RECHAZAR ❌"],
+                        selectableCount: 1
+                    }
+                });
+
+                if (pollMsg && pollMsg.key && pollMsg.key.id) {
+                    pagosPendientes[pollMsg.key.id] = {
                         clienteJid: remoteJid,
                         monto: monto.trim(),
                         referencia: ref.trim(),
-                        detalle: detalle.trim()
+                        detalle: detalle.trim(),
+                        originalMsg: pollMsg.message
                     };
                 }
             }
