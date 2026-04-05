@@ -190,11 +190,27 @@ async function connectToWhatsApp() {
 
         const remoteJid = msg.key.remoteJid;
 
-        // Parsear el texto según sea mensaje simple o extendido
-        const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        // Parsear el texto según sea mensaje simple, extendido, o la captura (caption) de una imagen
+        let texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
+        const isImage = !!msg.message?.imageMessage;
 
-        // Ignorar si no hay texto (imágenes, audios sin captura, estados)
-        if (!texto) return;
+        // Si mandan una imagen sola (sin texto), creamos un texto simulado para que Groq lo entienda
+        if (isImage && !texto) {
+            texto = "[El cliente ha enviado una imagen adjunta (posible comprobante)]";
+        }
+
+        // Ignorar si no hay texto y no es imagen (audios, stickers, estados)
+        if (!texto && !isImage) return;
+
+        // Si es una imagen, reenviarla INMEDIATAMENTE al dueño
+        if (isImage && !msg.key.fromMe) {
+            try {
+                await sock.sendMessage(NUMERO_ADMIN, { forward: msg });
+                await sock.sendMessage(NUMERO_ADMIN, { text: `⬆️ *ALERTA*: El cliente ${remoteJid.split('@')[0]} acaba de enviar la imagen de arriba.\n(Si es el pago, espera a que el bot reciba la referencia para aprobarlo).` });
+            } catch (err) {
+                console.error("Error reenviando imagen:", err);
+            }
+        }
 
         console.log(`\n📩 [${remoteJid}]: ${texto}`);
 
