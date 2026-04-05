@@ -27,6 +27,29 @@ const HORA_CIERRE = 24;
 
 const NUMERO_ADMIN = "584166436082@s.whatsapp.net";
 const pagosPendientes = {};
+const botMuteados = {};
+const sentMsgIds = new Set();
+
+const LAT_LOCAL = 10.2266128;
+const LON_LOCAL = -67.542349;
+
+async function calcularCostoDelivery(latCliente, lonCliente) {
+    try {
+        const url = `http://router.project-osrm.org/route/v1/driving/${LON_LOCAL},${LAT_LOCAL};${lonCliente},${latCliente}?overview=false`;
+        const res = await axios.get(url, { timeout: 6000 });
+        if (res.data && res.data.routes && res.data.routes.length > 0) {
+            const distanceMeters = res.data.routes[0].distance;
+            const distanceKm = distanceMeters / 1000;
+            // $1 por cada 2 km => $0.5 por km
+            let costo = distanceKm * 0.5;
+            costo = Math.round(costo * 100) / 100;
+            return { km: distanceKm.toFixed(2), costo };
+        }
+    } catch(err) {
+        console.error("Error calculando distancia OSRM:", err.message);
+    }
+    return null;
+}
 
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 let dbPromise;
@@ -81,6 +104,9 @@ REGLAS IMPORTANTES:
 - Tus respuestas deben ser CORTAS y CONCISAS. Máximo 3-4 líneas.
 - Usa emojis con moderación 🍔✨
 - Muestra SIEMPRE los precios en USD y en Bolívares (Bs).
+- Antes de procesar el pago, PREGUNTA OBLIGATORIAMENTE si desean "Retirar por el local" o "Servicio de Delivery".
+- Si eligen DELIVERY, exígeles que usen la opción de WhatsApp (Clip 📎 -> Ubicación) para enviarte la Ubicación Actual. Sé firme y no avances sin la ubicación.
+- Si el [SISTEMA] te dice automáticamente el costo del delivery según la ubicación que mandaron, suma ese monto al total de los pedidos SIN preguntar de nuevo, explícales el nuevo total y dales los métodos de pago.
 - Si el cliente quiere pagar, comparte datos y pide comprobante.
 - CUANDO el cliente te responda con la Referencia y Monto del pago, añade al final de tu mensaje: [GUARDAR_PAGO|referencia|monto|pedido]
 - No inventes platos.
@@ -144,6 +170,14 @@ async function connectToWhatsApp() {
         browser: Browsers.ubuntu('Chrome')
     });
 
+    async function enviarMensajeBot(jid, content, options = {}) {
+        const m = await sock.sendMessage(jid, content, options);
+        if (m && m.key && m.key.id) {
+            sentMsgIds.add(m.key.id);
+        }
+        return m;
+    }
+
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
@@ -196,13 +230,13 @@ async function connectToWhatsApp() {
                     if (aprobarVote > 0) {
                         console.log(`✅ Dueño APROBÓ pago Ref: ${pagoData.referencia} mediante Encuesta`);
                         await registrarPagoGoogleForm(pagoData.clienteJid, pagoData.monto, pagoData.referencia, pagoData.detalle);
-                        await sock.sendMessage(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
-                        await sock.sendMessage(key.remoteJid, { text: `✅ El pago de la Ref: ${pagoData.referencia} ha sido APROBADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
+                        await enviarMensajeBot(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
+                        await enviarMensajeBot(key.remoteJid, { text: `✅ El pago de la Ref: ${pagoData.referencia} ha sido APROBADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
                         delete pagosPendientes[key.id];
                     } else if (rechazarVote > 0) {
                         console.log(`❌ Dueño RECHAZÓ pago Ref: ${pagoData.referencia} mediante Encuesta`);
-                        await sock.sendMessage(pagoData.clienteJid, { text: `❌ Hubo un inconveniente con tu pago con referencia **${pagoData.referencia}**. Nuestro equipo revisó las cuentas y no logró verificarlo.\n\nPor favor, verifica los datos del comprobante y contáctanos si hubo algún error de transferencia.` });
-                        await sock.sendMessage(key.remoteJid, { text: `❌ El pago de la Ref: ${pagoData.referencia} ha sido RECHAZADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
+                        await enviarMensajeBot(pagoData.clienteJid, { text: `❌ Hubo un inconveniente con tu pago con referencia **${pagoData.referencia}**. Nuestro equipo revisó las cuentas y no logró verificarlo.\n\nPor favor, verifica los datos del comprobante y contáctanos si hubo algún error de transferencia.` });
+                        await enviarMensajeBot(key.remoteJid, { text: `❌ El pago de la Ref: ${pagoData.referencia} ha sido RECHAZADO. El cliente fue notificado. (Ya puedes ignorar la encuesta de arriba).` });
                         delete pagosPendientes[key.id];
                     }
                 } catch (err) {
@@ -217,29 +251,54 @@ async function connectToWhatsApp() {
         if (!mensajesNuevos || mensajesNuevos.length === 0) return;
 
         const msg = mensajesNuevos[0];
-
-        // Evitarnos a nosotros mismos u otros broadcasts
-        if (!msg.message || msg.key.fromMe) return;
-
         const remoteJid = msg.key.remoteJid;
 
-        // Parsear el texto según sea mensaje simple, extendido, o la captura (caption) de una imagen
+        // --- SISTEMA DE SILENCIO (MUTE) POR CAJERA ---
+        if (msg.key.fromMe) {
+            if (!sentMsgIds.has(msg.key.id) && remoteJid !== 'status@broadcast') {
+                botMuteados[remoteJid] = Date.now() + 15 * 60 * 1000;
+                console.log(`🔇 La Cajera escribió en ${remoteJid}. Bot silenciado por 15 minutos.`);
+            }
+            return;
+        }
+
+        if (botMuteados[remoteJid] && botMuteados[remoteJid] > Date.now()) {
+            return; // No responder si la cajera está atendiendo
+        }
+        
+        if (!msg.message || remoteJid === 'status@broadcast') return;
+
+        // Parsear el texto
         let texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
         const isImage = !!msg.message?.imageMessage;
+        const locationMessage = msg.message?.locationMessage;
 
-        // Si mandan una imagen sola (sin texto), creamos un texto simulado para que Groq lo entienda
+        // Si envían Ubicación GPS
+        if (locationMessage) {
+            const lat = locationMessage.degreesLatitude;
+            const lon = locationMessage.degreesLongitude;
+            console.log(`📍 Ubicación recibida: ${lat}, ${lon}`);
+            const delData = await calcularCostoDelivery(lat, lon);
+            if (delData) {
+                await enviarMensajeBot(remoteJid, { text: `📍 *Ubicación detectada*.\nDistancia calculada: ${delData.km} km.\nCosto Delivery: $${delData.costo}` });
+                texto = `[SISTEMA: El cliente ha enviado su ubicación GPS. La ruta es de ${delData.km}km y el Costo del Delivery es de $${delData.costo}. Suma esta cantidad al subtotal, comunícasela al cliente, e ínstalo a proceder con el pago.]`;
+            } else {
+                await enviarMensajeBot(remoteJid, { text: `❌ Falló la comprobación del GPS. Indica tu zona manualmente.` });
+                texto = `[SISTEMA: El cliente trató de enviar su ubicación pero falló. Pregúntale a qué colonia o zona enviará para calcular tarifa manual.]`;
+            }
+        }
+
         if (isImage && !texto) {
             texto = "[El cliente ha enviado una imagen adjunta (posible comprobante)]";
         }
 
-        // Ignorar si no hay texto y no es imagen (audios, stickers, estados)
-        if (!texto && !isImage) return;
+        if (!texto && !isImage && !locationMessage) return;
 
         // Si es una imagen, reenviarla INMEDIATAMENTE al dueño
         if (isImage && !msg.key.fromMe) {
             try {
-                await sock.sendMessage(NUMERO_ADMIN, { forward: msg });
-                await sock.sendMessage(NUMERO_ADMIN, { text: `⬆️ *ALERTA*: El cliente ${remoteJid.split('@')[0]} acaba de enviar la imagen de arriba.\n(Si es el pago, espera a que el bot reciba la referencia para aprobarlo).` });
+                await enviarMensajeBot(NUMERO_ADMIN, { forward: msg });
+                await enviarMensajeBot(NUMERO_ADMIN, { text: `⬆️ *ALERTA*: El cliente ${remoteJid.split('@')[0]} acaba de enviar la imagen de arriba.\n(Si es el pago, espera a que el bot reciba la referencia para aprobarlo).` });
             } catch (err) {
                 console.error("Error reenviando imagen:", err);
             }
@@ -259,25 +318,25 @@ async function connectToWhatsApp() {
                 if (decision.includes("aprobar") || decision.includes("si") || decision.includes("sí") || decision === "1") {
                     console.log(`✅ Dueño APROBÓ pago Ref: ${pagoData.referencia}`);
                     await registrarPagoGoogleForm(pagoData.clienteJid, pagoData.monto, pagoData.referencia, pagoData.detalle);
-                    await sock.sendMessage(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
-                    await sock.sendMessage(remoteJid, { text: `✅ El pago ha sido APROBADO correctamente. Se guardó en Google Forms y el cliente fue notificado.` });
+                    await enviarMensajeBot(pagoData.clienteJid, { text: `✅ ¡Tu pago de **${pagoData.monto}** con la referencia **${pagoData.referencia}** ha sido verificado y APROBADO por nuestro equipo!\n\n🍔 Tu pedido ya está en preparación.` });
+                    await enviarMensajeBot(remoteJid, { text: `✅ El pago ha sido APROBADO correctamente. Se guardó en Google Forms y el cliente fue notificado.` });
                     delete pagosPendientes[stanzaId];
                     return;
                 } else if (decision.includes("rechazar") || decision.includes("no") || decision === "0" || decision === "2") {
                     console.log(`❌ Dueño RECHAZÓ pago Ref: ${pagoData.referencia}`);
-                    await sock.sendMessage(pagoData.clienteJid, { text: `❌ Hubo un inconveniente con tu pago con referencia **${pagoData.referencia}**. Nuestro equipo revisó las cuentas y no logró verificarlo.\n\nPor favor, verifica los datos del comprobante y contáctanos si hubo algún error de transferencia.` });
-                    await sock.sendMessage(remoteJid, { text: `❌ El pago de la Ref: ${pagoData.referencia} ha sido RECHAZADO. El cliente fue notificado.` });
+                    await enviarMensajeBot(pagoData.clienteJid, { text: `❌ Hubo un inconveniente con tu pago con referencia **${pagoData.referencia}**. Nuestro equipo revisó las cuentas y no logró verificarlo.\n\nPor favor, verifica los datos del comprobante y contáctanos si hubo algún error de transferencia.` });
+                    await enviarMensajeBot(remoteJid, { text: `❌ El pago de la Ref: ${pagoData.referencia} ha sido RECHAZADO. El cliente fue notificado.` });
                     delete pagosPendientes[stanzaId];
                     return;
                 } else {
-                    await sock.sendMessage(remoteJid, { text: `⚠️ Por favor, vota en la Encuesta, o responde este mensaje con "Aprobar" o "Rechazar".` });
+                    await enviarMensajeBot(remoteJid, { text: `⚠️ Por favor, vota en la Encuesta, o responde este mensaje con "Aprobar" o "Rechazar".` });
                     return;
                 }
             }
         }
 
         if (!restauranteAbierto()) {
-            await sock.sendMessage(remoteJid, { text: "¡Hola! 😊 En este momento estamos cerrados. 🌙\nNuestro horario es de 7:00 AM – 12:00 AM.\n¡Escríbenos cuando abramos! 🍔" });
+            await enviarMensajeBot(remoteJid, { text: "¡Hola! 😊 En este momento estamos cerrados. 🌙\nNuestro horario es de 7:00 AM – 12:00 AM.\n¡Escríbenos cuando abramos! 🍔" });
             return;
         }
 
@@ -308,12 +367,12 @@ async function connectToWhatsApp() {
                 respuestaStr += "\n\n⏳ *He enviado los datos de tu pago a nuestro personal para su validación manual. Te avisaremos por aquí tan pronto como lo verifiquen.*";
 
                 // Enviar detalle completo primero
-                await sock.sendMessage(NUMERO_ADMIN, {
+                await enviarMensajeBot(NUMERO_ADMIN, {
                     text: `⚠️ *NUEVO PAGO EN ESPERA DE VERIFICACIÓN*\n\n📱 *Número:* ${remoteJid.split('@')[0]}\n💰 *Monto:* ${monto.trim()}\n🔢 *Referencia:* ${ref.trim()}\n📋 *Detalle:* ${detalle.trim()}`
                 });
 
                 // Enviar la Encuesta debajo
-                const pollMsg = await sock.sendMessage(NUMERO_ADMIN, {
+                const pollMsg = await enviarMensajeBot(NUMERO_ADMIN, {
                     poll: {
                         name: `¿Validar el pago Ref: ${ref.trim()}?`,
                         values: ["APROBAR ✅", "RECHAZAR ❌"],
@@ -335,11 +394,11 @@ async function connectToWhatsApp() {
             historialUsuarios[remoteJid].push({ role: "assistant", content: respuestaStr });
 
             // Responder con Baileys
-            await sock.sendMessage(remoteJid, { text: respuestaStr });
+            await enviarMensajeBot(remoteJid, { text: respuestaStr });
 
         } catch (error) {
             console.error("Error pidiendo a Groq o enviando mensaje:", error.message);
-            await sock.sendMessage(remoteJid, { text: "¡Ups! Tuve un pequeño problema técnico. 😅 ¿Puedes repetir tu mensaje?" });
+            await enviarMensajeBot(remoteJid, { text: "¡Ups! Tuve un pequeño problema técnico. 😅 ¿Puedes repetir tu mensaje?" });
         }
     });
 }
