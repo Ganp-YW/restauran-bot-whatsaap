@@ -28,6 +28,7 @@ const HORA_CIERRE = 24;
 const NUMERO_ADMIN = "584166436082@s.whatsapp.net";
 const pagosPendientes = {};
 const botMuteados = {};
+const lastHumanReplyTime = {};
 const sentMsgIds = new Set();
 
 const LAT_LOCAL = 10.2266128;
@@ -246,28 +247,8 @@ async function connectToWhatsApp() {
         }
     });
 
-    sock.ev.on('messages.upsert', async (m) => {
-        const mensajesNuevos = m.messages;
-        if (!mensajesNuevos || mensajesNuevos.length === 0) return;
 
-        const msg = mensajesNuevos[0];
-        const remoteJid = msg.key.remoteJid;
-
-        // --- SISTEMA DE SILENCIO (MUTE) POR CAJERA ---
-        if (msg.key.fromMe) {
-            if (!sentMsgIds.has(msg.key.id) && remoteJid !== 'status@broadcast') {
-                botMuteados[remoteJid] = Date.now() + 15 * 60 * 1000;
-                console.log(`🔇 La Cajera escribió en ${remoteJid}. Bot silenciado por 15 minutos.`);
-            }
-            return;
-        }
-
-        if (botMuteados[remoteJid] && botMuteados[remoteJid] > Date.now()) {
-            return; // No responder si la cajera está atendiendo
-        }
-        
-        if (!msg.message || remoteJid === 'status@broadcast') return;
-
+    async function procesarMensajeCliente(msg, remoteJid) {
         // Parsear el texto
         let texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption;
         const isImage = !!msg.message?.imageMessage;
@@ -363,15 +344,12 @@ async function connectToWhatsApp() {
                 const [_, ref, monto, detalle] = match;
                 respuestaStr = respuestaStr.replace(/\[GUARDAR_PAGO.*?\]/, '').trim();
                 
-                // En lugar de guardar directo, enviamos notificacion en el mensaje del bot
                 respuestaStr += "\n\n⏳ *He enviado los datos de tu pago a nuestro personal para su validación manual. Te avisaremos por aquí tan pronto como lo verifiquen.*";
 
-                // Enviar detalle completo primero
                 await enviarMensajeBot(NUMERO_ADMIN, {
                     text: `⚠️ *NUEVO PAGO EN ESPERA DE VERIFICACIÓN*\n\n📱 *Número:* ${remoteJid.split('@')[0]}\n💰 *Monto:* ${monto.trim()}\n🔢 *Referencia:* ${ref.trim()}\n📋 *Detalle:* ${detalle.trim()}`
                 });
 
-                // Enviar la Encuesta debajo
                 const pollMsg = await enviarMensajeBot(NUMERO_ADMIN, {
                     poll: {
                         name: `¿Validar el pago Ref: ${ref.trim()}?`,
@@ -392,14 +370,54 @@ async function connectToWhatsApp() {
             }
 
             historialUsuarios[remoteJid].push({ role: "assistant", content: respuestaStr });
-
-            // Responder con Baileys
             await enviarMensajeBot(remoteJid, { text: respuestaStr });
 
         } catch (error) {
             console.error("Error pidiendo a Groq o enviando mensaje:", error.message);
             await enviarMensajeBot(remoteJid, { text: "¡Ups! Tuve un pequeño problema técnico. 😅 ¿Puedes repetir tu mensaje?" });
         }
+    }
+
+    sock.ev.on('messages.upsert', async (m) => {
+        const mensajesNuevos = m.messages;
+        if (!mensajesNuevos || mensajesNuevos.length === 0) return;
+
+        const msg = mensajesNuevos[0];
+        const remoteJid = msg.key.remoteJid;
+
+        // --- SISTEMA DE SILENCIO (MUTE) POR CAJERA ---
+        if (msg.key.fromMe) {
+            if (!sentMsgIds.has(msg.key.id) && remoteJid !== 'status@broadcast') {
+                botMuteados[remoteJid] = Date.now() + 15 * 60 * 1000; // Mute de 15 minutos
+                lastHumanReplyTime[remoteJid] = Date.now();
+                console.log(`🔇 La Cajera escribió en ${remoteJid}. Bot silenciado temporalmente.`);
+            }
+            return;
+        }
+
+        if (!msg.message || remoteJid === 'status@broadcast') return;
+
+        // Si el bot está en modo "Silencio", activamos temporizador (Fallback) de asitencia
+        if (botMuteados[remoteJid] && botMuteados[remoteJid] > Date.now()) {
+            console.log(`⏳ Cliente ${remoteJid} escribió durante el Mute. Esperando 2 mins por la cajera...`);
+            const timeOfMessage = Date.now();
+            
+            setTimeout(async () => {
+                // Si la cajera respondió después del temporizador, entonces abortamos asistencia
+                if (lastHumanReplyTime[remoteJid] && lastHumanReplyTime[remoteJid] > timeOfMessage) {
+                    console.log(`✅ Cajera asistió a ${remoteJid} a tiempo.`);
+                } else {
+                    console.log(`⚠️ Cajera NO intervino con ${remoteJid} durante los 2 minutos de gracia. El bot tomará control.`);
+                    delete botMuteados[remoteJid]; // Levantar Mute
+                    await procesarMensajeCliente(msg, remoteJid);
+                }
+            }, 120000); // 2 Minutos
+            
+            return;
+        }
+        
+        // Si no está silenciado, procesar inmediatamente
+        await procesarMensajeCliente(msg, remoteJid);
     });
 }
 
